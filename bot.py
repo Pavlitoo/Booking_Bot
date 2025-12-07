@@ -7,41 +7,15 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from supabase import create_client, Client
 from datetime import datetime
+import config
 
-# --- 1. ХИТРІСТЬ ДЛЯ RENDER (Фейковий сервер) ---
-app = Flask(__name__)
+# Налаштування логування
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-@app.route('/')
-def home():
-    return "Bot is alive and running!"
-
-def run_web_server():
-    # Render видає порт автоматично, ми його ловимо
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_web_server)
-    t.start()
-
-# --- 2. НАЛАШТУВАННЯ (Беремо з сервера або локально) ---
-try:
-    import config
-    SUPABASE_URL = config.SUPABASE_URL
-    SUPABASE_KEY = config.SUPABASE_KEY
-    TG_BOT_TOKEN = config.TG_BOT_TOKEN
-except ImportError:
-    # На Render файлу config.py не буде, беремо зі змінних
-    SUPABASE_URL = os.environ.get("SUPABASE_URL")
-    SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-    TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
-
-# Логування
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --- ФУНКЦІЇ БОТА ---
+supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -66,9 +40,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            f"✅ **Вітаю у TimeHub!**\n\n"
-            f"Бот працює на сервері 24/7.\n"
-            f"Натисніть кнопку **Menu** зліва знизу, щоб відкрити запис.",
+            f"Вітаю у TimeHub!\n\n"
+            f"Ваш профіль майстра налаштовано.\n"
+            f"ID: `{user.id}`\n"
+            f"Робочий час: 09:00 - 18:00\n\n"
+            f"Оберіть дію нижче або використовуйте команди:\n"
+            f"/add - Додати послугу\n"
+            f"/list - Переглянути послуги\n"
+            f"/bookings - Записи клієнтів\n"
+            f"/help - Допомога",
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
@@ -82,7 +62,10 @@ async def add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(args) < 3:
         await update.message.reply_text(
-            "Формат: /add Назва Ціна Час\nПриклад: `/add Манікюр 450 60`",
+            "Формат: /add Назва Ціна Час\n\n"
+            "Приклад:\n"
+            "`/add Манікюр 450 60`\n"
+            "`/add Стрижка чоловіча 300 45`",
             parse_mode="Markdown"
         )
         return
@@ -91,94 +74,179 @@ async def add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration = args[-1]
     name = " ".join(args[:-2])
 
-    service_data = {"master_id": user.id, "name": name, "price": int(price), "duration": int(duration)}
+    print(f"Adding service: {name}, {price} UAH, {duration} min")
+
+    service_data = {
+        "master_id": user.id,
+        "name": name,
+        "price": int(price),
+        "duration": int(duration)
+    }
 
     try:
         supabase.table("services").insert(service_data).execute()
-        await update.message.reply_text(f"✅ Послугу **{name}** додано!", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"Послугу додано!\n\n"
+            f"Назва: {name}\n"
+            f"Вартість: {price} грн\n"
+            f"Тривалість: {duration} хв",
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        await update.message.reply_text(f"Помилка: {e}")
+        print(f"Error adding service: {e}")
+        await update.message.reply_text(f"Не вдалося додати послугу: {e}")
 
 async def list_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
     try:
         response = supabase.table("services").select("*").eq("master_id", user.id).execute()
         services = response.data
+
         if not services:
-            await update.message.reply_text("Послуг немає. Додайте через /add")
+            await update.message.reply_text(
+                "У вас поки немає послуг.\n"
+                "Додайте першу командою:\n"
+                "`/add Назва Ціна Час`",
+                parse_mode="Markdown"
+            )
             return
-        
-        text = "📋 **Ваші послуги:**\n\n"
+
+        text = "Ваші послуги:\n\n"
         keyboard = []
+
         for service in services:
-            text += f"🔹 {service['name']} — {service['price']} грн ({service['duration']} хв)\n"
-            keyboard.append([InlineKeyboardButton(f"❌ Видалити {service['name']}", callback_data=f"delete_{service['id']}")])
-        
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            text += f"{service['name']}\n"
+            text += f"Ціна: {service['price']} грн | Час: {service['duration']} хв\n"
+            text += f"ID: `{service['id']}`\n\n"
+
+            keyboard.append([InlineKeyboardButton(
+                f"Видалити '{service['name']}'",
+                callback_data=f"delete_{service['id']}"
+            )])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+
     except Exception as e:
-        await update.message.reply_text(f"Помилка: {e}")
+        print(f"Error listing services: {e}")
+        await update.message.reply_text("Помилка отримання послуг.")
 
 async def view_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
     try:
-        response = supabase.table("bookings").select("*, services(name)").eq("master_id", user.id).order("booking_time").execute()
+        response = supabase.table("bookings").select(
+            "*, services(name, price, duration)"
+        ).eq("master_id", user.id).order("booking_time").execute()
+
         bookings = response.data
+
         if not bookings:
-            await update.message.reply_text("📭 Записів поки немає.")
+            await update.message.reply_text("У вас поки немає записів клієнтів.")
             return
 
-        text = "📅 **Записи клієнтів:**\n\n"
-        for booking in bookings:
-            service_name = booking['services']['name'] if booking.get('services') else "—"
-            raw_time = booking['booking_time']
-            try:
-                # Очистка часу від Z або +00:00
-                if "+" in raw_time: booking_time = datetime.fromisoformat(raw_time.split("+")[0])
-                elif "Z" in raw_time: booking_time = datetime.fromisoformat(raw_time.replace("Z", ""))
-                else: booking_time = datetime.fromisoformat(raw_time)
-                date_str = booking_time.strftime("%d.%m о %H:%M")
-            except: date_str = raw_time
+        text = "Записи клієнтів:\n\n"
 
-            client_phone = booking.get('client_phone', 'Немає')
-            text += f"👤 {booking['client_name']}\n📞 `{client_phone}`\n💅 {service_name} — {date_str}\n──────────\n"
+        for booking in bookings:
+            service_name = booking['services']['name'] if booking.get('services') else "Невідома послуга"
+            booking_time = datetime.fromisoformat(booking['booking_time'].replace('+02', ''))
+            date_str = booking_time.strftime("%d.%m.%Y о %H:%M")
+
+            text += f"{booking['client_name']}\n"
+            text += f"Послуга: {service_name}\n"
+            text += f"Час: {date_str}\n"
+            text += f"Статус: {booking.get('status', 'pending')}\n\n"
 
         await update.message.reply_text(text, parse_mode="Markdown")
+
     except Exception as e:
+        print(f"Error viewing bookings: {e}")
         await update.message.reply_text(f"Помилка: {e}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Команди:\n/start\n/add Назва Ціна Час\n/list\n/bookings")
+    help_text = (
+        "Команди TimeHub:\n\n"
+        "/start - Налаштувати профіль\n"
+        "/add Назва Ціна Час - Додати послугу\n"
+        "/list - Переглянути всі послуги\n"
+        "/bookings - Записи клієнтів\n"
+        "/help - Ця довідка\n\n"
+        "Приклад додавання послуги:\n"
+        "`/add Манікюр 450 60`"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def button_handler(query_update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = query_update.callback_query
     await query.answer()
+
     user = query.from_user
 
     if query.data == "help_add":
-        await query.edit_message_text("Пиши: `/add Манікюр 300 60`", parse_mode="Markdown")
-    
+        await query.edit_message_text(
+            "Щоб додати послугу, використайте команду:\n\n"
+            "`/add Назва Ціна Час`\n\n"
+            "Приклади:\n"
+            "`/add Манікюр 450 60`\n"
+            "`/add Стрижка жіноча 500 45`\n"
+            "`/add Масаж обличчя 350 30`",
+            parse_mode="Markdown"
+        )
+
     elif query.data == "list_services":
-        # Виклик функції списку (дублювання логіки для кнопки)
-        await list_services(query_update, context) # Це спрощено, краще викликати окремо
-        
+        try:
+            response = supabase.table("services").select("*").eq("master_id", user.id).execute()
+            services = response.data
+
+            if not services:
+                await query.edit_message_text("У вас поки немає послуг.")
+                return
+
+            text = "Ваші послуги:\n\n"
+            for service in services:
+                text += f"{service['name']}\n"
+                text += f"Ціна: {service['price']} грн | Час: {service['duration']} хв\n\n"
+
+            await query.edit_message_text(text, parse_mode="Markdown")
+        except Exception as e:
+            await query.edit_message_text(f"Помилка: {e}")
+
     elif query.data == "view_bookings":
-        await query.message.reply_text("👇 Ваші записи:")
-        await view_bookings(query_update, context)
+        try:
+            response = supabase.table("bookings").select(
+                "*, services(name)"
+            ).eq("master_id", user.id).order("booking_time").execute()
+
+            bookings = response.data
+
+            if not bookings:
+                await query.edit_message_text("Записів поки немає.")
+                return
+
+            text = "Записи:\n\n"
+            for booking in bookings[:5]:
+                service_name = booking['services']['name'] if booking.get('services') else "Невідома"
+                booking_time = datetime.fromisoformat(booking['booking_time'].replace('+02', ''))
+                date_str = booking_time.strftime("%d.%m о %H:%M")
+
+                text += f"{booking['client_name']} - {service_name}\n{date_str}\n\n"
+
+            await query.edit_message_text(text, parse_mode="Markdown")
+        except Exception as e:
+            await query.edit_message_text(f"Помилка: {e}")
 
     elif query.data.startswith("delete_"):
         service_id = query.data.split("_")[1]
         try:
             supabase.table("services").delete().eq("id", service_id).execute()
-            await query.edit_message_text("✅ Послугу видалено!")
+            await query.edit_message_text("Послугу видалено!")
         except Exception as e:
-            await query.edit_message_text(f"Помилка: {e}")
+            await query.edit_message_text(f"Помилка видалення: {e}")
 
 if __name__ == '__main__':
-    # 1. Запускаємо сервер, щоб Render не вимкнув нас
-    keep_alive()
+    app = ApplicationBuilder().token(config.TG_BOT_TOKEN).build()
 
-    # 2. Запускаємо бота
-    app = ApplicationBuilder().token(TG_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_service))
     app.add_handler(CommandHandler("list", list_services))
@@ -186,5 +254,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Bot is running...")
+    print("TimeHub bot started successfully!")
     app.run_polling()
